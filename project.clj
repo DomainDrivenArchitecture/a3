@@ -11,6 +11,7 @@
                  ["releases" :clojars]]
   :deploy-repositories [["snapshots" :clojars]
                         ["releases" :clojars]]
+  :main asn1.parser
   :profiles {:jdk11{:dependencies [[javax.xml.bind/jaxb-api "2.4.0-b180830.0359"]]}
              :test {:test-paths ["src/test/clj"]
                     :resource-paths ["src/test/resources"]
