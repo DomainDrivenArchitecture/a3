@@ -9,28 +9,20 @@
 (def oid-encoding {"2A8648CE3D317" {:oid "1.2 .840.10045.3.1.7"
                                     :name "prime256v1"}})
 
-(def asn1-encoding {0x02 {:name "INTEGER"
-                          :header-length 2
-                          :type :prim}
-                    0x03 {:name "BIT STRING"
-                          :header-length 2
-                          :type :prim}
-                    0x04 {:name "OCTET STRING"
-                          :header-length 2
-                          :type :prim}
-                    0x06 {:name "OBJECT"
-                          :header-length 2
-                          :type :prim}
-                    0x30 {:name "SEQUENCE"
-                          :alt-name "sequence of"
-                          :header-length 2
-                          :type :cons}
-                    -95 {:name "cont"
-                         :header-length 2
-                         :type :cons}
-                    -96 {:name "cont"
-                         :header-length 2
-                         :type :cons}})
+(def tag-encoding {"00000" {:name "cont"
+                            :header-length 2}
+                   "00001" {:name "cont"
+                            :header-length 2}
+                   "00010" {:name "INTEGER"
+                            :header-length 2}
+                   "00011" {:name "BIT STRING"
+                            :header-length 2}
+                   "00100" {:name "OCTET STRING"
+                            :header-length 2}
+                   "00110" {:name "OBJECT"
+                            :header-length 2}
+                   "10000" {:name "SEQUENCE"
+                            :header-length 2}})
 
 (defn base64-extract
   [path]
@@ -45,76 +37,128 @@
   [path]
   (ByteBuffer/wrap (base64-bytes path)))
 
+(defn i->hex [b]
+  (format "%X" b))
+
+(defn i->bin [b]
+  (take-last
+   8
+   (concat '(\0 \0 \0 \0 \0 \0 \0 \0)
+           (char-array (Integer/toBinaryString b)))))
+
 (defn read-tag [& bs]
-  (if-let [tag (first bs)]
-    tag
-    (throw (ex-info "tag not found" {}))))
+  (if-let [byte (first bs)]
+    (let [hex-string (i->hex byte)
+          bin (i->bin byte)
+          class (take 2 bin)
+          primitive? (= \0 (last (take 3 bin)))
+          tag (apply str (take-last 5 bin))
+          elem (get tag-encoding tag)
+          output (merge elem {:hex hex-string
+                              :bin bin
+                              :class class
+                              :tag tag
+                              :type (if primitive? :prim :cons)})]
+      ;;(println output)
+      output)
+    (throw (ex-message "tag not found"))))
 
-(defn read-length [& bs]
-  (if-let [length (second bs)]
-    length
-    (throw (ex-info "length not found" {}))))
-
-(defn decode-value [elem value]
-  (let [hex-val (str/join (map #(format "%X" %) value))]
-    (println hex-val)
-    (if (= (:name  elem) "OBJECT")
-      (get oid-encoding hex-val)
-      hex-val)))
-
-(defn decode-inner [state & bs]
-  (if (not-empty bs)
-    (let [tag (apply read-tag bs)
-          length (apply read-length bs)
-          elem (get asn1-encoding tag)
-          type (:type elem)
-          output {:offset (:offset state)
-                  :depth (:depth state)
-                  :header-length (:header-length elem)
-                  :value-length length
-                  type (:name elem)}
-          offset-inc (:header-length elem)
-          tail (nthrest bs offset-inc)
-          result (conj (:result state)
-                       output)]
-      (println bs)
-      (println output)
-      (case type
-        :cons
-        (assoc state :result
-               (concat result
-                       (:result
-                        (apply decode-inner
-                               (assoc state
-                                      :offset (+ (:offset state) offset-inc)
-                                      :depth (inc (:depth state)))
-                               tail))))
-        :prim
-        (let [split-value (split-at length tail)
-              value (first split-value)
-              tail (second split-value)
-              offset-inc (+ (:header-length elem) length)
-              output (assoc output
-                            :value (decode-value elem value))
-              result (conj (:result state)
-                           output)]
-          (assoc state :result
-                 (concat result
-                         (:result
-                          (apply decode-inner
-                                 (assoc state
-                                        :offset (+ (:offset state) offset-inc))
-                                 tail)))))
-        (throw (ex-info "unknown type" {}))))
+(defn read-length [b]
+  (if (some? b)
     (do
-      (println state)
-      state)))
+      ;;(println "length" (i->hex b) (i->bin b))
+      b)
+    (throw (ex-message "length not found"))))
+
+(defn decode-tag [state b]
+  (let [elem (read-tag b)]
+    (merge state 
+           {:next-step :length
+            :tag elem})))
+
+(defn decode-length [state b]
+  (let [length (read-length b)]
+    (merge state
+           {:next-step :value
+            :value-length length})))
+
+(defn decode-primitive-value [state bs]
+  (let [{:keys [offset depth tag value-length result]} state
+        {:keys [header-length type name]} tag
+        hex-val (str/join (map #(format "%X" %) bs))
+        value (if (= name "OBJECT") (get oid-encoding hex-val) hex-val)
+        output  {:o offset
+                 :d depth
+                 :hl header-length
+                 :l value-length
+                 :v value
+                 type name}]
+    (merge state
+           {:offset (+ offset value-length header-length)
+            :next-step :tag
+            :result (conj result output)})))
+
+(defn decode-constructed-value [state bs]
+  (let [{:keys [offset depth tag value-length result]} state
+        {:keys [header-length type name]} tag
+        output  {:o offset
+                 :d depth
+                 :hl header-length
+                 :l value-length
+                 type name}]
+    (merge state
+           {:offset (+ offset header-length)
+            :next-step :tag
+            :result (conj result output)})))
+
+(defn descend [state]
+  (let [{:keys [depth]} state]
+    (merge state
+           {:tag {}
+            :next-step :tag
+            :depth (inc depth)})))
+
+(defn decode-elements [state & bs]
+  (let [{:keys [next-step tag value-length]} state
+        {:keys [type]} tag
+        byte (first bs)]
+    ;;(println next-step state bs)
+    (case next-step
+      :tag (if (some? bs) 
+             (apply decode-elements
+                    (decode-tag state byte)
+                    (rest bs))
+             (apply decode-elements
+                    (merge state {:next-step :end})
+                    bs))
+      :length (apply decode-elements
+                     (decode-length state byte)
+                     (rest bs))
+      :value (if (= type :prim)
+               (apply decode-elements
+                      (decode-primitive-value state (take value-length bs))
+                      (nthrest bs value-length))
+               (let [constructed-value (take value-length bs)
+                     constructed-rest (nthrest bs value-length)
+                     state-with-value (decode-constructed-value state constructed-value)
+                     state-with-descend (merge (apply decode-elements
+                                                      (descend state-with-value)
+                                                      constructed-value)
+                                               (select-keys state-with-value [:depth :next-step]))]
+                 (apply decode-elements
+                        state-with-descend
+                        constructed-rest)))
+      :end state
+      (throw (ex-message "unknown step")))))
 
 (defn decode [& bs]
   (:result
-   (apply decode-inner {:offset 0
-                        :depth 0
-                        :result []}
+   (apply decode-elements {:offset 0
+                            :depth 0
+                            :next-step :tag
+                            :tag {}
+                            :value-length 0
+                            :result []}
           bs)))
 
 (defn my-parse [bs]

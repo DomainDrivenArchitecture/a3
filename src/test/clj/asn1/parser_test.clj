@@ -11,6 +11,17 @@
       (= []
          (apply cut/decode []))))
 
+(deftest should-decode-integers
+  (is (= [{:o 0, :d 0, :hl 2, :l 1, :v "1", :prim "INTEGER"}
+          {:o 3, :d 0, :hl 2, :l 1, :v "3", :prim "INTEGER"}]
+         (apply cut/decode [2 1 1 2 1 3]))))
+
+(deftest should-decode-secuence
+  (is (= [{:o 0, :d 0, :hl 2, :l 3, :cons "SEQUENCE"}
+          {:o 2, :d 1, :hl 2, :l 1, :v "1", :prim "INTEGER"}
+          {:o 5, :d 0, :hl 2, :l 1, :v "3", :prim "INTEGER"}]
+         (apply cut/decode [48 3 2 1 1 2 1 3]))))
+
 (deftest should-parse-rsa
   (is
    (= "    
